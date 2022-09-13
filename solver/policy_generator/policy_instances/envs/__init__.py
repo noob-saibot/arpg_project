@@ -1,0 +1,1 @@
+from solver.policy_generator.policy_instances.envs.simple_arena import SimpleArenaEnv
