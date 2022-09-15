@@ -3,6 +3,7 @@ from gym import spaces
 import pygame
 import numpy as np
 from enum import Enum
+from functools import reduce
 
 
 class ActionSpace(Enum):
@@ -15,12 +16,24 @@ class ActionSpace(Enum):
 
 
 class Actions(Enum):
-    TurnR = -90
-    TurnL = 90
+    TurnR = 90
+    TurnL = -90
     MoveF = 1
     MoveB = -1
     Touch = None
     Jump = None
+
+
+class Box(spaces.Box):
+    @property
+    def size(self):
+        return reduce(lambda x, y: x*y, self.shape)
+
+
+class Discrete(spaces.Discrete):
+    @property
+    def size(self):
+        return 1
 
 
 class SimpleArenaEnv(gym.Env):
@@ -34,15 +47,16 @@ class SimpleArenaEnv(gym.Env):
         # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
         self.observation_space = spaces.Dict(
             {
-                "agent": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-                "target": spaces.Box(0, size - 1, shape=(2,), dtype=int),
-                "agent_direction": spaces.Discrete(4, start=0),
-                "velocity": spaces.Discrete(4, start=-1),
+                "agent": Box(0, size - 1, shape=(2,), dtype=int),
+                "target": Box(0, size - 1, shape=(2,), dtype=int),
+                "agent_direction": Discrete(4, start=0),
+                "velocity": Discrete(4, start=-1)
             }
         )
 
         # We have 4 actions, corresponding to "turn right", "turn left", "move forward", "touch", "jump"
         self.action_space = spaces.Discrete(5)
+        self.step_counter = 0
 
         """
         The following dictionary maps abstract actions from `self.action_space` to 
@@ -53,6 +67,10 @@ class SimpleArenaEnv(gym.Env):
 
         assert render_mode is None or render_mode in self.metadata["render_modes"]
         self.render_mode = render_mode
+        self.distance_prev = None
+        self.distance_curr = None
+        self._agent_location = None
+        self._target_location = None
 
         """
         If human-rendering is used, `self.window` will be a reference
@@ -64,11 +82,15 @@ class SimpleArenaEnv(gym.Env):
         self.window = None
         self.clock = None
 
+    @property
+    def shape(self):
+        return np.sum([space.size for space in self.observation_space.values()])
+
     def _get_obs(self):
         return {
-            "agent": self._agent_location,
+            "agent": self._agent_location.astype(np.int64),
             "agent_direction": self._agent_direction,
-            "target": self._target_location,
+            "target": self._target_location.astype(np.int64),
             "velocity": self._move_speed,
         }
 
@@ -108,12 +130,13 @@ class SimpleArenaEnv(gym.Env):
         return observation, info
 
     def step(self, action):
-        print(action)
+        self.step_counter += 1
         action = ActionSpace(action)
         direction = Actions[ActionSpace(action).name].value
+        self.distance_prev = self._get_distance(self._agent_location, self._target_location)
 
         if action in [ActionSpace.TurnL, ActionSpace.TurnR]:
-            self._agent_direction = (self._agent_direction + direction) % 360
+            self._agent_direction = (self._agent_direction - direction) % 360
             self._move_speed = 0
         elif action in [ActionSpace.MoveF, ActionSpace.MoveB]:
             # We use `np.clip` to make sure we don't leave the grid
@@ -132,13 +155,14 @@ class SimpleArenaEnv(gym.Env):
                 0,
                 self.size - 1,
             )
+        self.distance_curr = self._get_distance(self._agent_location, self._target_location)
 
         # An episode is done iff the agent has reached the target
         terminated = (
             np.array_equal(self._agent_location, self._target_location)
             and action == ActionSpace.Touch
         )
-        reward = 1 if terminated else 0  # Binary sparse rewards
+        reward = self._calculate_reward(action) - self.step_counter % 2  # Binary sparse rewards
         observation = self._get_obs()
         info = self._get_info()
 
@@ -146,6 +170,57 @@ class SimpleArenaEnv(gym.Env):
             self._render_frame()
 
         return observation, reward, terminated, False, info
+
+    def _calculate_reward(self, action):
+        same_lock = np.array_equal(self._agent_location, self._target_location)
+        if same_lock and action == ActionSpace.Touch:
+            return 10
+        if same_lock:
+            return 5
+        if action in [ActionSpace.TurnL, ActionSpace.TurnR]:
+            if same_lock:
+                return -2
+            if self._same_quadrant():
+                return 1
+            return -1
+        if action in [ActionSpace.MoveF, ActionSpace.MoveB]:
+            if self.distance_curr < self.distance_prev:
+                if self._move_speed == 2:
+                    return 2
+                return 1
+            else:
+                if self._move_speed == 2:
+                    return -2
+                return -1
+        if action == ActionSpace.Touch:
+            return -1
+
+    @staticmethod
+    def _get_distance(point1, point2):
+        temp = point1 - point2
+        sum_sq = np.dot(temp.T, temp)
+        return np.sqrt(sum_sq)
+
+    def _same_quadrant(self):
+        if self._agent_direction == 0:
+            view_quadrants = {1, 2}
+        elif self._agent_direction == 90:
+            view_quadrants = {4, 1}
+        elif self._agent_direction == 180:
+            view_quadrants = {3, 4}
+        else:
+            view_quadrants = {2, 3}
+
+        diff = self._agent_location - self._target_location
+        if diff[0] < 0 and diff[1] > 0:
+            target_quadrant = 1
+        elif diff[0] < 0 and diff[1] < 0:
+            target_quadrant = 2
+        elif diff[0] > 0 and diff[1] < 0:
+            target_quadrant = 3
+        else:
+            target_quadrant = 4
+        return target_quadrant in view_quadrants
 
     def render(self):
         if self.render_mode == "rgb_array":
@@ -184,6 +259,7 @@ class SimpleArenaEnv(gym.Env):
             ),
             self._agent_direction * np.pi / 180 - 0.7,
             self._agent_direction * np.pi / 180 + 0.7,
+            3
         )
 
         # Finally, add some gridlines
