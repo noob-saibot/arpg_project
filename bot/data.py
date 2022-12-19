@@ -1,9 +1,10 @@
 from pydantic import BaseModel
+import typing as T
 
 
 class InputState(BaseModel):
     session_id: str
-    description: str | None = None
+    description: T.Optional[str] = None
     state: dict
 
 

@@ -42,6 +42,7 @@ class SimpleArenaEnv(gym.Env):
     def __init__(self, render_mode=None, size=10):
         self.size = size  # The size of the square grid
         self.window_size = 512  # The size of the PyGame window
+        self.max_step = 100
 
         # Observations are dictionaries with the agent's and the target's location.
         # Each location is encoded as an element of {0, ..., `size`}^2, i.e. MultiDiscrete([size, size]).
@@ -50,10 +51,9 @@ class SimpleArenaEnv(gym.Env):
                 "agent": Box(0, size - 1, shape=(2,), dtype=int),
                 "target": Box(0, size - 1, shape=(2,), dtype=int),
                 "agent_direction": Discrete(4, start=0),
-                "velocity": Discrete(4, start=-1)
+                "velocity": Discrete(4, start=-1),
             }
         )
-
         # We have 4 actions, corresponding to "turn right", "turn left", "move forward", "touch", "jump"
         self.action_space = spaces.Discrete(5)
         self.step_counter = 0
@@ -104,6 +104,8 @@ class SimpleArenaEnv(gym.Env):
     def reset(self, seed=None, options=None):
         # We need the following line to seed self.np_random
         super().reset(seed=seed)
+        self.step_counter = 0
+        self.visited_target = False
 
         # Choose the agent's location uniformly at random
         self._agent_location = self.np_random.integers(
@@ -159,10 +161,12 @@ class SimpleArenaEnv(gym.Env):
 
         # An episode is done iff the agent has reached the target
         terminated = (
-            np.array_equal(self._agent_location, self._target_location)
-            and action == ActionSpace.Touch
+            (np.array_equal(self._agent_location, self._target_location)
+             and action == ActionSpace.Touch) or self.step_counter == self.max_step
         )
-        reward = self._calculate_reward(action) - self.step_counter % 2  # Binary sparse rewards
+        reward = self._calculate_reward(action) \
+            if self.step_counter != self.max_step \
+            else -100  # Binary sparse rewards
         observation = self._get_obs()
         info = self._get_info()
 
@@ -174,26 +178,31 @@ class SimpleArenaEnv(gym.Env):
     def _calculate_reward(self, action):
         same_lock = np.array_equal(self._agent_location, self._target_location)
         if same_lock and action == ActionSpace.Touch:
-            return 10
-        if same_lock:
-            return 5
+            return 100
         if action in [ActionSpace.TurnL, ActionSpace.TurnR]:
             if same_lock:
                 return -2
-            if self._same_quadrant():
-                return 1
-            return -1
+            elif self._same_quadrant():
+                return 2
+            return -5
         if action in [ActionSpace.MoveF, ActionSpace.MoveB]:
-            if self.distance_curr < self.distance_prev:
+            if same_lock:
+                if not self.visited_target:
+                    self.visited_target = True
+                    return 50
+                else:
+                    self.visited_target = False
+                    return -50
+            elif self.distance_curr < self.distance_prev:
                 if self._move_speed == 2:
-                    return 2
-                return 1
+                    return 5
+                return 2
             else:
                 if self._move_speed == 2:
-                    return -2
-                return -1
-        if action == ActionSpace.Touch:
-            return -1
+                    return -5
+                return -2
+        if action in [ActionSpace.Touch, ActionSpace.Jump]:
+            return -2
 
     @staticmethod
     def _get_distance(point1, point2):
